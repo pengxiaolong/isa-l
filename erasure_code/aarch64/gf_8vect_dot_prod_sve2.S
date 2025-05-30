@@ -1,6 +1,6 @@
 .text
 .align		6
-.arch		armv8-a+sve2
+.arch		armv9-a+sve2
 
 #include "../include/aarch64_label.h"
 
