@@ -4,9 +4,9 @@
 
 #include "../include/aarch64_label.h"
 
-.global cdecl(gf_2vect_mad_sve2)
+.global cdecl(gf_vect_mad_sve2)
 #ifndef __APPLE__
-.type gf_2vect_mad_sve2, %function
+.type gf_vect_mad_sve2, %function
 #endif
 
 /* Arguments */
@@ -22,40 +22,34 @@ w_ret		.req	w0
 
 /* Local variables */
 x_pos		.req	x6
-x_dest2		.req	x7
-x_dest1		.req	x12
+x_dest_ptr	.req	x7
+x_tbl_ptr	.req	x8
 
 /* Vector registers */
 z_mask0f	.req	z0
 z_src		.req	z1
 z_src_lo	.req	z2
-z_src_hi	.req	z1      /* Reuse z_src */
-z_dest1		.req	z3
-z_tmp_lo	.req	z4
-z_tmp_hi	.req	z5
-z_gft1_lo	.req	z6
-z_gft1_hi	.req	z7
-z_gft2_lo	.req	z17
-z_gft2_hi	.req	z18
-z_dest2		.req	z27
+z_src_hi	.req	z3
+z_dest		.req	z4
+z_tmp_lo	.req	z5
+z_tmp_hi	.req	z6
+z_gft_lo	.req	z16
+z_gft_hi	.req	z17
 
-cdecl(gf_2vect_mad_sve2):
+cdecl(gf_vect_mad_sve2):
 	/* Minimum vector length check */
 	cmp	x_len, #16
 	blt	.return_fail
 
 	/* Initialize mask */
-	mov	z_mask0f.b, #0x0f
+	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
 
-	/* Load Galois field tables */
-	add	x_tbl, x_tbl, x_vec_i, LSL #5	/* x_tbl += vec_i * 32 */
-	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += vec * 32 */
-	ldp	q_gft2_lo, q_gft2_hi, [x_tbl]
+	/* Load destination pointer */
+	ldr	x_dest_ptr, [x_dest]
 
-	/* Load destination pointers */
-	ldr	x_dest1, [x_dest, #8*0]
-	ldr	x_dest2, [x_dest, #8*1]
+	/* Load Galois field table */
+	add	x_tbl_ptr, x_tbl, x_vec_i, LSL #5	/* x_tbl += vec_i * 32 */
+	ldp	q_gft_lo, q_gft_hi, [x_tbl_ptr]
 
 	mov	x_pos, #0
 
@@ -64,32 +58,25 @@ cdecl(gf_2vect_mad_sve2):
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	/* Prefetch destination data (streaming for better cache utilization) */
-	prfb	pldl2strm, p0, [x_dest1, x_pos]
-	prfb	pldl2strm, p0, [x_dest2, x_pos]
+	/* Prefetch destination data */
+	prfb	pldl2strm, p0, [x_dest_ptr, x_pos]
 
 	/* Load source and split into nibbles */
 	ld1b	z_src.b, p0/z, [x_src, x_pos]
 	and	z_src_lo.d, z_src.d, z_mask0f.d
-	usra	z_src_hi.b, z_src.b, #4	/* SVE2: More efficient than lsr */
+	lsr	z_src_hi.b, z_src.b, #4		/* Split into hi nibbles */
 
-	/* Load destination vectors */
-	ld1b	z_dest1.b, p0/z, [x_dest1, x_pos]
-	ld1b	z_dest2.b, p0/z, [x_dest2, x_pos]
+	/* Load destination vector */
+	ld1b	z_dest.b, p0/z, [x_dest_ptr, x_pos]
 
-	/* GF(2^8) multiply-accumulate for dest1 */
-	tbl	z_tmp_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_tmp_hi.b, {z_gft1_hi.b}, z_src_hi.b
-	eor3	z_dest1.d, z_tmp_lo.d, z_tmp_hi.d, z_dest1.d	/* SVE2: Single instruction for 3-way XOR */
+	/* GF(2^8) multiply-accumulate */
+	tbl	z_tmp_lo.b, {z_gft_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi.b, {z_gft_hi.b}, z_src_hi.b
+	eor	z_dest.d, z_tmp_lo.d, z_dest.d
+	eor	z_dest.d, z_tmp_hi.d, z_dest.d
 
-	/* GF(2^8) multiply-accumulate for dest2 */
-	tbl	z_tmp_lo.b, {z_gft2_lo.b}, z_src_lo.b
-	tbl	z_tmp_hi.b, {z_gft2_hi.b}, z_src_hi.b
-	eor3	z_dest2.d, z_tmp_lo.d, z_tmp_hi.d, z_dest2.d	/* SVE2: Single instruction for 3-way XOR */
-
-	/* Store results */
-	st1b	z_dest1.b, p0, [x_dest1, x_pos]
-	st1b	z_dest2.b, p0, [x_dest2, x_pos]
+	/* Store result */
+	st1b	z_dest.b, p0, [x_dest_ptr, x_pos]
 
 	/* Next vector position */
 	incb	x_pos
