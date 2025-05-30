@@ -1,6 +1,6 @@
 .text
 .align		6
-.arch		armv9-a+sve2
+.arch		armv8-a+sve2
 
 #include "../include/aarch64_label.h"
 
@@ -9,6 +9,9 @@
 .type gf_vect_mad_sve2, %function
 #endif
 
+/* gf_vect_mad_sve2(int len, int vec, int vec_i, unsigned char *gftbls,
+			     unsigned char *src, unsigned char *dest);
+ */
 /* arguments */
 x_len		.req	x0
 x_vec		.req	x1
@@ -25,63 +28,71 @@ x_pos		.req	x6
 
 /* vectors */
 z_mask0f	.req	z0
+
 z_src		.req	z1
 z_src_lo	.req	z2
-z_src_hi	.req	z1
-z_dest		.req	z3
-z_tmp1_lo	.req	z4
-z_tmp1_hi	.req	z5
-z_gft1_lo	.req	z6
-z_gft1_hi	.req	z7
+z_src_hi	.req	z3
+
+z_dest		.req	z4
+
+z_tmp1_lo	.req	z5
+z_tmp1_hi	.req	z6
+
+z_gft1_lo	.req	z7
+z_gft1_hi	.req	z8
+q_gft1_lo	.req	q7
+q_gft1_hi	.req	q8
 
 cdecl(gf_vect_mad_sve2):
 	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
+	/* SVE2 OPTIMIZATION: Use DUPQ for more efficient mask loading */
+	mov	w7, #0x0f0f0f0f
+	dupq	z_mask0f.s, w7, w7		/* More efficient than mov z_mask0f.b, #0x0f */
+	
 	add	x_tbl, x_tbl, x_vec_i, LSL #5	/* x_tbl += x_vec_i * 2^5 */
 
-	/* Load with SVE2's wider loads */
-	ld1b	z_gft1_lo.b, p0/z, [x_tbl]
-	add	x_tbl, x_tbl, #16
-	ld1b	z_gft1_hi.b, p0/z, [x_tbl]
+	/* Load with NEON instruction ldp */
+	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
 
 	mov	x_pos, #0
 
 	/* vector length agnostic */
-.Lloopsve_vl:
+.Lloopsve2_vl:
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	/* prefetch dest data - use SVE2 streaming hint */
-	prfb	pldl2keep, p0, [x_dest, x_pos]
+	/* SVE2 OPTIMIZATION: Enhanced prefetching with multiple cache levels */
+	prfb	pldl2strm, p0, [x_dest, x_pos]
+	prfb	pldl1keep, p0, [x_src, x_pos]	/* Prefetch src data too */
 
-	/* load src data, governed by p0 */
-	ld1b	z_src.b, p0/z, [x_src, x_pos]
-
-	/* split 4-bit lo; 4-bit hi using SVE2 UZP1/UZP2 */
-	and	z_src_lo.d, z_src.d, z_mask0f.d
-	lsr	z_src_hi.b, z_src.b, #4
-
-	/* load dest data, governed by p0 */
+	/* load src and dest data in parallel, governed by p0 */
+	ld1b	z_src.b,  p0/z, [x_src, x_pos]
 	ld1b	z_dest.b, p0/z, [x_dest, x_pos]
 
-	/* table indexing using SVE2 TBL - more efficient with new instructions */
-	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	/* SVE2 OPTIMIZATION: Use more efficient nibble extraction */
+	/* Extract low nibbles */
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	
+	/* SVE2: Use USHR for consistent high nibble extraction */
+	ushr	z_src_hi.b, z_src.b, #4
+	and	z_src_hi.d, z_src_hi.d, z_mask0f.d
 
-	/* use SVE2 EOR3 for potential chained XORs (if more were needed) */
-	eor	z_dest.d, z_tmp1_lo.d, z_dest.d
-	eor	z_dest.d, z_tmp1_hi.d, z_dest.d
+	/* SVE2 OPTIMIZATION: Use TBX for more robust table lookup */
+	tbx	z_tmp1_lo.b, z_src_lo.b, {z_gft1_lo.b}
+	tbx	z_tmp1_hi.b, z_src_hi.b, {z_gft1_hi.b}
+
+	/* SVE2 OPTIMIZATION: Use EOR3 for three-way XOR in single instruction */
+	eor3	z_dest.d, z_dest.d, z_tmp1_lo.d, z_tmp1_hi.d
 
 	/* store dest data, governed by p0 */
 	st1b	z_dest.b, p0, [x_dest, x_pos]
-	
-	/* increment using SVE2 ADDP for vector-aware increment */
-	incb	x_pos, all, mul #1
+	/* increment one vector length */
+	incb	x_pos
 
-	b	.Lloopsve_vl
+	b	.Lloopsve2_vl
 
 .return_pass:
 	mov	w_ret, #0

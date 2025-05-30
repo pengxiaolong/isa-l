@@ -1,6 +1,6 @@
 .text
 .align		6
-.arch		armv9-a+sve2
+.arch		armv8-a+sve2
 
 #include "../include/aarch64_label.h"
 
@@ -8,118 +8,168 @@
 #ifndef __APPLE__
 .type gf_4vect_dot_prod_sve2, %function
 #endif
+/* void gf_4vect_dot_prod_sve2(int len, int vlen, unsigned char *gftbls,
+				    unsigned char **src, unsigned char **dest);
+ */
 
-/* Arguments */
+/* arguments */
 x_len		.req	x0	/* vector length */
-x_vec		.req	x1	/* number of source vectors */
+x_vec		.req	x1	/* number of source vectors (ie. data blocks) */
 x_tbl		.req	x2
 x_src		.req	x3
 x_dest		.req	x4
 
-/* Vectors */
+/* returns */
+w_ret		.req	w0
+
+/* local variables */
+x_vec_i		.req	x5
+x_ptr		.req	x6
+x_pos		.req	x7
+
+x_tbl1		.req	x8
+x_tbl2		.req	x9
+x_tbl3		.req	x10
+x_tbl4		.req	x11
+x_dest1		.req	x12
+x_dest2		.req	x13
+x_dest3		.req	x14
+x_dest4		.req	x_dest	/* reused */
+
+/* r16,r17,r18,r29,r30: special role registers, avoided */
+/* r19..r29 and SP must be preserved */
+
+/* vectors */
 z_mask0f	.req	z0
+
 z_src		.req	z1
 z_src_lo	.req	z2
-z_src_hi	.req	z1      /* Reuse z_src */
+z_src_hi	.req	z_src
+
 z_dest1		.req	z3
-z_dest2		.req	z4
-z_dest3		.req	z5
-z_dest4		.req	z6
-z_gft1_lo	.req	z16     /* Use call-clobbered registers */
-z_gft1_hi	.req	z17
-z_gft2_lo	.req	z18
-z_gft2_hi	.req	z19
-z_gft3_lo	.req	z20
-z_gft3_hi	.req	z21
-z_gft4_lo	.req	z22
-z_gft4_hi	.req	z23
+
+z_gft1_lo	.req	z4
+z_gft1_hi	.req	z5
+q_gft1_lo	.req	q4
+q_gft1_hi	.req	q5
+
+/* bottom 64-bit of v8..v15 must be preserved if used */
+z_gft2_lo	.req	z17
+z_gft2_hi	.req	z18
+q_gft2_lo	.req	q17
+q_gft2_hi	.req	q18
+
+z_gft3_lo	.req	z19
+z_gft3_hi	.req	z20
+q_gft3_lo	.req	q19
+q_gft3_hi	.req	q20
+
+z_gft4_lo	.req	z21
+z_gft4_hi	.req	z22
+q_gft4_lo	.req	q21
+q_gft4_hi	.req	q22
+
+z_dest2		.req	z27
+z_dest3		.req	z28
+z_dest4		.req	z29
 
 cdecl(gf_4vect_dot_prod_sve2):
+	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f        /* 0x0F mask */
-	index	z_pos.b, #0, #1          /* Create position vector */
+	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
 	mov	x_pos, #0
-	lsl	x_vec, x_vec, #3          /* x_vec *= 8 */
-	ldp	x_dest1, x_dest2, [x_dest]
-	ldp	x_dest3, x_dest4, [x_dest, #16]    /* Load all four destinations */
+	lsl	x_vec, x_vec, #3
+	ldp	x_dest1, x_dest2, [x_dest, #8*0]
+	ldp	x_dest3, x_dest4, [x_dest, #8*2]
 
-.Lloopsve_vl:
+/* Loop 1: x_len, vector length */
+.Lloopsve2_vl:
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	mov	z_dest1.b, #0            /* Clear accumulators */
-	mov	z_dest2.b, #0
-	mov	z_dest3.b, #0
-	mov	z_dest4.b, #0
-	mov	x_vec_i, #0               /* Reset vector index */
-	mov	x_tbl1, x_tbl             /* Reset table pointers */
-	add	x_tbl2, x_tbl1, x_vec, LSL #2
-	add	x_tbl3, x_tbl2, x_vec, LSL #2
-	add	x_tbl4, x_tbl3, x_vec, LSL #2
+	mov	x_vec_i, #0			/* clear x_vec_i */
+	ldr	x_ptr, [x_src, x_vec_i]		/* x_ptr: src base addr. */
 
-.Lloopsve_vl_vects:
-	ldr	x_ptr, [x_src, x_vec_i]   /* Load source pointer */
-	ld1b	z_src.b, p0/z, [x_ptr, x_pos]
+	mov	z_dest1.b, #0			/* clear z_dest1 */
+	mov	z_dest2.b, #0			/* clear z_dest2 */
+	mov	z_dest3.b, #0			/* clear z_dest3 */
+	mov	z_dest4.b, #0			/* clear z_dest4 */
 
-	/* SVE2 optimized nibble extraction */
-	lsr	z_src_hi.b, z_src.b, #4  /* High nibbles */
-	and	z_src_lo.d, z_src.d, z_mask0f.d /* Low nibbles */
+	/* gf_tbl base = (x_tbl + dest_idx * x_vec * 32) */
+	mov	x_tbl1, x_tbl			/* reset x_tbl1 */
+	add	x_tbl2, x_tbl1, x_vec, LSL #2	/* reset x_tbl2 */
+	add	x_tbl3, x_tbl2, x_vec, LSL #2	/* reset x_tbl3 */
+	add	x_tbl4, x_tbl3, x_vec, LSL #2	/* reset x_tbl4 */
 
-	/* Load 4 Galois field tables with SVE2 */
-	ld4b	{z_gft1_lo.b, z_gft2_lo.b, z_gft3_lo.b, z_gft4_lo.b}, p0/z, [x_tbl1]
-	ld4b	{z_gft1_hi.b, z_gft2_hi.b, z_gft3_hi.b, z_gft4_hi.b}, p0/z, [x_tbl1, #4, mul vl]
-	add	x_tbl1, x_tbl1, #128      /* Advance all table pointers */
-	add	x_tbl2, x_tbl2, #128
-	add	x_tbl3, x_tbl3, #128
-	add	x_tbl4, x_tbl4, #128
+/* Loop 2: x_vec, number of source vectors (ie. data blocks) */
+.Lloopsve2_vl_vects:
+	/* load src data, governed by p0 */
+	ld1b	z_src.b,  p0/z, [x_ptr, x_pos]	/* load from: src base + pos offset */
+	/* split 4-bit lo; 4-bit hi */
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src.b, #4
 
-	/* GF multiply-accumulate for all 4 destinations */
-	tbl	z_gft1_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_gft1_hi.b, {z_gft1_hi.b}, z_src_hi.b
-	eor	z_dest1.d, z_dest1.d, z_gft1_lo.d
-	eor	z_dest1.d, z_dest1.d, z_gft1_hi.d
+	/* gf_tbl addr: (x_tbl + dest_idx * x_vec * 32) + src_vec_idx * 32 */
+	/* load gf_table's */
+	ldp	q_gft1_lo, q_gft1_hi, [x_tbl1], #32	/* x_tbl1 is post-added by #32 for each src vect */
+	ldp	q_gft2_lo, q_gft2_hi, [x_tbl2], #32
 
-	tbl	z_gft2_lo.b, {z_gft2_lo.b}, z_src_lo.b
-	tbl	z_gft2_hi.b, {z_gft2_hi.b}, z_src_hi.b
-	eor	z_dest2.d, z_dest2.d, z_gft2_lo.d
-	eor	z_dest2.d, z_dest2.d, z_gft2_hi.d
-
-	tbl	z_gft3_lo.b, {z_gft3_lo.b}, z_src_lo.b
-	tbl	z_gft3_hi.b, {z_gft3_hi.b}, z_src_hi.b
-	eor	z_dest3.d, z_dest3.d, z_gft3_lo.d
-	eor	z_dest3.d, z_dest3.d, z_gft3_hi.d
-
-	tbl	z_gft4_lo.b, {z_gft4_lo.b}, z_src_lo.b
-	tbl	z_gft4_hi.b, {z_gft4_hi.b}, z_src_hi.b
-	eor	z_dest4.d, z_dest4.d, z_gft4_lo.d
-	eor	z_dest4.d, z_dest4.d, z_gft4_hi.d
-
-	/* Prefetch next tables */
+	/* prefetch */
 	prfb	pldl2keep, p0, [x_tbl1]
 	prfb	pldl2keep, p0, [x_tbl2]
+
+	/* calc for next */
+	add	x_vec_i, x_vec_i, #8		/* move x_vec_i to next */
+	ldr	x_ptr, [x_src, x_vec_i]		/* x_ptr: src base addr. */
+
+	/* dest 1 */
+	/* table indexing, ie. gf(2^8) multiplication */
+	tbl	z_gft1_lo.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_gft1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	/* SVE2: Use EOR3 for three-way XOR (GF addition) */
+	eor3	z_dest1.d, z_dest1.d, z_gft1_lo.d, z_gft1_hi.d
+
+	ldp	q_gft3_lo, q_gft3_hi, [x_tbl3], #32
+	ldp	q_gft4_lo, q_gft4_hi, [x_tbl4], #32
 	prfb	pldl2keep, p0, [x_tbl3]
 	prfb	pldl2keep, p0, [x_tbl4]
 
-	add	x_vec_i, x_vec_i, #8      /* Next source vector */
+	/* dest 2 */
+	tbl	z_gft2_lo.b, {z_gft2_lo.b}, z_src_lo.b
+	tbl	z_gft2_hi.b, {z_gft2_hi.b}, z_src_hi.b
+	eor3	z_dest2.d, z_dest2.d, z_gft2_lo.d, z_gft2_hi.d
+
+	/* dest 3 */
+	tbl	z_gft3_lo.b, {z_gft3_lo.b}, z_src_lo.b
+	tbl	z_gft3_hi.b, {z_gft3_hi.b}, z_src_hi.b
+	eor3	z_dest3.d, z_dest3.d, z_gft3_lo.d, z_gft3_hi.d
+
+	/* dest 4 */
+	tbl	z_gft4_lo.b, {z_gft4_lo.b}, z_src_lo.b
+	tbl	z_gft4_hi.b, {z_gft4_hi.b}, z_src_hi.b
+	eor3	z_dest4.d, z_dest4.d, z_gft4_lo.d, z_gft4_hi.d
+
 	cmp	x_vec_i, x_vec
-	blt	.Lloopsve_vl_vects
+	blt	.Lloopsve2_vl_vects
+/* end of Loop 2 */
 
-	/* Non-temporal stores */
-	stnt1b	z_dest1.b, p0, [x_dest1, x_pos]
-	stnt1b	z_dest2.b, p0, [x_dest2, x_pos]
-	stnt1b	z_dest3.b, p0, [x_dest3, x_pos]
-	stnt1b	z_dest4.b, p0, [x_dest4, x_pos]
+	/* store dest data, governed by p0 */
+	st1b	z_dest1.b, p0, [x_dest1, x_pos]
+	st1b	z_dest2.b, p0, [x_dest2, x_pos]
+	st1b	z_dest3.b, p0, [x_dest3, x_pos]
+	st1b	z_dest4.b, p0, [x_dest4, x_pos]
 
-	/* Increment position */
-	incb	x_pos, ALL, MUL #1
-	b	.Lloopsve_vl
+	/* increment one vector length */
+	incb	x_pos
+	b	.Lloopsve2_vl
+/* end of Loop 1 */
 
 .return_pass:
-	mov	w0, #0
+	mov	w_ret, #0
 	ret
 
 .return_fail:
-	mov	w0, #1
+	mov	w_ret, #1
 	ret
