@@ -63,7 +63,7 @@ z_dest5		.req	z30
 z_dest6		.req	z31
 z_dest7		.req	z15
 
-// Table registers
+// Table registers (d8-d15 / z8-z15 must be preserved)
 z_gft1_lo	.req	z4
 z_gft1_hi	.req	z5
 z_gft2_lo	.req	z8
@@ -73,6 +73,7 @@ z_gft3_hi	.req	z11
 z_gft4_lo	.req	z12
 z_gft4_hi	.req	z13
 z_gft5_lo	.req	z14
+z_gft5_hi	.req	z15	// Correctly defined now
 z_gft6_lo	.req	z17
 z_gft6_hi	.req	z18
 z_gft7_lo	.req	z6
@@ -86,11 +87,15 @@ cdecl(gf_7vect_dot_prod_sve2):
 	cmp	x_len, #16
 	blt	.return_fail
 
-	// Preserve callee-saved registers x19-x23
-	sub	sp, sp, #48
-	stp	x19, x20, [sp]
-	stp	x21, x22, [sp, #16]
-	str	x23, [sp, #32]
+	// Preserve callee-saved registers x19-x23 and d8-d15
+	sub	sp, sp, #112
+	stp	x19, x20, [sp, #16]
+	stp	x21, x22, [sp, #32]
+	str	x23,     [sp, #48]
+	stp	d8, d9,   [sp, #64]
+	stp	d10, d11, [sp, #80]
+	stp	d12, d13, [sp, #96]
+	stp	d14, d15, [sp, #112]
 
 
 	mov	z_mask0f.b, #0x0f		// z_mask0f = 0x0F0F...0F
@@ -134,15 +139,15 @@ cdecl(gf_7vect_dot_prod_sve2):
 
 	// Split source bytes into low and high 4-bit nibbles
 	and	z_src_lo.d, z_src_in.d, z_mask0f.d
-	lsr	z_src_hi.b, z_src_in.b, #4
-
+	movprfx z_src_hi, z_src_in
+	lsr	z_src_hi.b, p0/m, z_src_hi.b, #4
 
 	// Load all GF multiplication tables
 	ldp	q4, q5, [x_tbl1], #32
 	ldp	q8, q9, [x_tbl2], #32
 	ldp	q10, q11, [x_tbl3], #32
 	ldp	q12, q13, [x_tbl4], #32
-	ldp	q14, z15.q, [x_tbl5], #32  // z_gft5_hi is z15
+	ldp	q14, q15, [x_tbl5], #32  // **FIXED** Was ldp q14, z15.q
 	ldp	q17, q18, [x_tbl6], #32
 	ldp	q6, q7, [x_tbl7], #32
 
@@ -160,15 +165,41 @@ cdecl(gf_7vect_dot_prod_sve2):
 	add	x_vec_i, x_vec_i, #8
 	ldr	x_ptr, [x_src, x_vec_i]
 
-	// --- OPTIMIZATION: Use non-destructive SVE2 TBL instruction ---
-	// Calculations for all 7 destinations
-	tbl	z_tmp_lo_res.b, {z_gft1_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft1_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest1.d, z_dest1.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft2_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft2_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest2.d, z_dest2.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft3_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft3_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest3.d, z_dest3.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft4_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft4_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest4.d, z_dest4.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft5_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft5_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest5.d, z_dest5.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft6_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft6_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest6.d, z_dest6.d, z_tmp_lo_res.d
-	tbl	z_tmp_lo_res.b, {z_gft7_lo.b}, z_src_lo.b; tbl z_tmp_hi_res.b, {z_gft7_hi.b}, z_src_hi.b; eor z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d; eor z_dest7.d, z_dest7.d, z_tmp_lo_res.d
+	// --- Calculations for all 7 destinations ---
+	tbl	z_tmp_lo_res.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft1_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest1.d, z_dest1.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft2_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft2_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest2.d, z_dest2.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft3_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft3_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest3.d, z_dest3.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft4_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft4_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest4.d, z_dest4.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft5_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft5_hi.b}, z_src_hi.b // **FIXED** z_gft5_hi is now defined
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest5.d, z_dest5.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft6_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft6_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest6.d, z_dest6.d, z_tmp_lo_res.d
+
+	tbl	z_tmp_lo_res.b, {z_gft7_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft7_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest7.d, z_dest7.d, z_tmp_lo_res.d
 
 	cmp	x_vec_i, x_vec
 	blt	.Lloopsve2_7v_vects
@@ -188,11 +219,15 @@ cdecl(gf_7vect_dot_prod_sve2):
 // End of outer loop
 
 .return_pass:
-	// Restore callee-saved registers x19-x23
-	ldr	x23, [sp, #32]
-	ldp	x21, x22, [sp, #16]
-	ldp	x19, x20, [sp]
-	add	sp, sp, #48
+	// Restore callee-saved registers
+	ldp	d14, d15, [sp, #112]
+	ldp	d12, d13, [sp, #96]
+	ldp	d10, d11, [sp, #80]
+	ldp	d8, d9,   [sp, #64]
+	ldr	x23,     [sp, #48]
+	ldp	x21, x22, [sp, #32]
+	ldp	x19, x20, [sp, #16]
+	add	sp, sp, #112
 
 	mov	w_ret, #0
 	ret
