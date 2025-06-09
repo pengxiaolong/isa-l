@@ -10,168 +10,156 @@
 #endif
 
 /* gf_5vect_mad_sve2(int len, int vec, int vec_i, unsigned char *gftbls,
-			      unsigned char *src, unsigned char **dest);
+			   unsigned char *src, unsigned char **dest);
  */
 /* arguments */
-x_len		.req	x0
-x_vec		.req	x1
-x_vec_i		.req	x2
-x_tbl		.req	x3
-x_src		.req	x4
-x_dest		.req	x5
+x_len		.req	x0	/* vector length in bytes */
+x_vec		.req	x1	/* number of vectors in total table */
+x_vec_i		.req	x2	/* index of current vector */
+x_tbl_base	.req	x3	/* pointer to base of all multiplication tables */
+x_src		.req	x4	/* pointer to the single source vector */
+x_dest_ptr_arr	.req	x5	/* pointer to array of destination vector pointers */
 
 /* returns */
 w_ret		.req	w0
 
 /* local variables */
-x_pos		.req	x6
-x_dest2		.req	x7
-x_dest3		.req	x8
-x_dest4		.req	x9
-x_dest5		.req	x10
-x_dest1		.req	x12
+x_pos		.req	x6	/* position offset within vectors */
+x_tbl		.req	x_tbl_base /* reuse register for current table pointer */
+x_dest2		.req	x7	/* pointer to dest2 vector */
+x_dest3		.req	x8	/* pointer to dest3 vector */
+x_dest4		.req	x9	/* pointer to dest4 vector */
+x_dest5		.req	x10	/* pointer to dest5 vector */
+x_dest1		.req	x12	/* pointer to dest1 vector */
+
 
 /* vectors */
-z_mask0f	.req	z0
+z_mask0f	.req	z0	// Mask for isolating low 4 bits of a byte
 
-z_src		.req	z1
+// Source data and split nibbles
+z_src_in	.req	z1
 z_src_lo	.req	z2
-z_src_hi	.req	z_src
+z_src_hi	.req	z16	// Use a distinct register for clarity
 
-z_dest1		.req	z3
-z_dest2		.req	z27
-z_dest3		.req	z28
-z_dest4		.req	z29
-z_dest5		.req	z30
+// Destination data registers
+z_dest1_inout	.req	z3
+z_dest2_inout	.req	z27
+z_dest3_inout	.req	z28
+z_dest4_inout	.req	z29
+z_dest5_inout	.req	z30
 
-/* Separate temporary vectors for parallel computation */
-z_tmp1_lo	.req	z4
-z_tmp1_hi	.req	z5
-z_tmp2_lo	.req	z11
-z_tmp2_hi	.req	z12
-z_tmp3_lo	.req	z13
-z_tmp3_hi	.req	z14
-z_tmp4_lo	.req	z15
-z_tmp4_hi	.req	z16
-z_tmp5_lo	.req	z25
-z_tmp5_hi	.req	z26
-
-z_gft1_lo	.req	z6
-z_gft1_hi	.req	z7
-q_gft1_lo	.req	q6
-q_gft1_hi	.req	q7
-
+// Table registers
+z_gft1_lo	.req	z4
+z_gft1_hi	.req	z5
 z_gft2_lo	.req	z17
 z_gft2_hi	.req	z18
-q_gft2_lo	.req	q17
-q_gft2_hi	.req	q18
-
 z_gft3_lo	.req	z19
 z_gft3_hi	.req	z20
-q_gft3_lo	.req	q19
-q_gft3_hi	.req	q20
-
 z_gft4_lo	.req	z21
 z_gft4_hi	.req	z22
-q_gft4_lo	.req	q21
-q_gft4_hi	.req	q22
-
 z_gft5_lo	.req	z23
 z_gft5_hi	.req	z24
-q_gft5_lo	.req	q23
-q_gft5_hi	.req	q24
+
+// SVE2 non-destructive TBL requires temporary registers for lookup results
+z_tmp_lo_res	.req	z6
+z_tmp_hi_res	.req	z7
+
 
 cdecl(gf_5vect_mad_sve2):
-	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
-	
-	/* load table 1 */
-	add	x_tbl, x_tbl, x_vec_i, LSL #5	/* x_tbl += x_vec_i * 2^5 */
-	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
-	
-	/* load table 2 */
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += x_vec * 2^5 */
-	ldp	q_gft2_lo, q_gft2_hi, [x_tbl]
-	
-	/* load table 3 */
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += x_vec * 2^5 */
-	ldp	q_gft3_lo, q_gft3_hi, [x_tbl]
-	
-	/* load table 4 */
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += x_vec * 2^5 */
-	ldp	q_gft4_lo, q_gft4_hi, [x_tbl]
-	
-	/* load table 5 */
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += x_vec * 2^5 */
-	ldp	q_gft5_lo, q_gft5_hi, [x_tbl]
+	mov	z_mask0f.b, #0x0f		// z_mask0f = 0x0F0F...0F
 
-	ldr	x_dest1, [x_dest, #8*0]		/* pointer to dest1 */
-	ldr	x_dest2, [x_dest, #8*1]		/* pointer to dest2 */
-	ldr	x_dest3, [x_dest, #8*2]		/* pointer to dest3 */
-	ldr	x_dest4, [x_dest, #8*3]		/* pointer to dest4 */
-	ldr	x_dest5, [x_dest, #8*4]		/* pointer to dest5 */
+	// Calculate pointer to the start of the tables for the current vector index
+	add	x_tbl, x_tbl_base, x_vec_i, LSL #5 // x_tbl_base + vec_i * 32
+
+	// Load the 32-byte multiplication tables for all five destinations
+	ldp	q4, q5, [x_tbl]             // z_gft1_lo, z_gft1_hi
+	add	x_tbl, x_tbl, x_vec, LSL #5
+	ldp	q17, q18, [x_tbl]           // z_gft2_lo, z_gft2_hi
+	add	x_tbl, x_tbl, x_vec, LSL #5
+	ldp	q19, q20, [x_tbl]           // z_gft3_lo, z_gft3_hi
+	add	x_tbl, x_tbl, x_vec, LSL #5
+	ldp	q21, q22, [x_tbl]           // z_gft4_lo, z_gft4_hi
+	add	x_tbl, x_tbl, x_vec, LSL #5
+	ldp	q23, q24, [x_tbl]           // z_gft5_lo, z_gft5_hi
+
+	// Load pointers to the five destination buffers
+	ldp	x_dest1, x_dest2, [x_dest_ptr_arr, #8*0]
+	ldp	x_dest3, x_dest4, [x_dest_ptr_arr, #8*2]
+	ldr	x_dest5, [x_dest_ptr_arr, #8*4]
 
 	mov	x_pos, #0
 
-	/* vector length agnostic */
-.Lloopsve2_vl:
+// Loop over vector chunks of SVE vector length (VL)
+.Lloopsve2_mad_5v_vl:
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	/* Prefetch all destinations early */
+	// Prefetch destination data for the next store operation
 	prfb	pldl2strm, p0, [x_dest1, x_pos]
 	prfb	pldl2strm, p0, [x_dest2, x_pos]
 	prfb	pldl2strm, p0, [x_dest3, x_pos]
 	prfb	pldl2strm, p0, [x_dest4, x_pos]
 	prfb	pldl2strm, p0, [x_dest5, x_pos]
 
-	/* load src data, governed by p0 */
-	ld1b	z_src.b,  p0/z, [x_src, x_pos]
+	// Load all source and destination data for the current vector chunk
+	ld1b	z_src_in.b,      p0/z, [x_src, x_pos]
+	ld1b	z_dest1_inout.b, p0/z, [x_dest1, x_pos]
+	ld1b	z_dest2_inout.b, p0/z, [x_dest2, x_pos]
+	ld1b	z_dest3_inout.b, p0/z, [x_dest3, x_pos]
+	ld1b	z_dest4_inout.b, p0/z, [x_dest4, x_pos]
+	ld1b	z_dest5_inout.b, p0/z, [x_dest5, x_pos]
 
-	/* SVE2: Use BEXT for efficient nibble extraction */
-	bext	z_src_lo.b, z_src.b, z_mask0f.b
-	lsr	z_src_hi.b, z_src.b, #4
 
-	/* Load all dest data in parallel */
-	ld1b	z_dest1.b, p0/z, [x_dest1, x_pos]
-	ld1b	z_dest2.b, p0/z, [x_dest2, x_pos]
-	ld1b	z_dest3.b, p0/z, [x_dest3, x_pos]
-	ld1b	z_dest4.b, p0/z, [x_dest4, x_pos]
-	ld1b	z_dest5.b, p0/z, [x_dest5, x_pos]
+	// Split source bytes into low and high 4-bit nibbles
+	and	z_src_lo.d, z_src_in.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src_in.b, #4
 
-	/* SVE2: Parallel table lookups for all destinations */
-	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
-	tbl	z_tmp2_lo.b, {z_gft2_lo.b}, z_src_lo.b
-	tbl	z_tmp2_hi.b, {z_gft2_hi.b}, z_src_hi.b
-	tbl	z_tmp3_lo.b, {z_gft3_lo.b}, z_src_lo.b
-	tbl	z_tmp3_hi.b, {z_gft3_hi.b}, z_src_hi.b
-	tbl	z_tmp4_lo.b, {z_gft4_lo.b}, z_src_lo.b
-	tbl	z_tmp4_hi.b, {z_gft4_hi.b}, z_src_hi.b
-	tbl	z_tmp5_lo.b, {z_gft5_lo.b}, z_src_lo.b
-	tbl	z_tmp5_hi.b, {z_gft5_hi.b}, z_src_hi.b
 
-	/* SVE2: Use EOR3 for 3-way XOR operations */
-	eor3	z_dest1.d, z_dest1.d, z_tmp1_lo.d, z_tmp1_hi.d
-	eor3	z_dest2.d, z_dest2.d, z_tmp2_lo.d, z_tmp2_hi.d
-	eor3	z_dest3.d, z_dest3.d, z_tmp3_lo.d, z_tmp3_hi.d
-	eor3	z_dest4.d, z_dest4.d, z_tmp4_lo.d, z_tmp4_hi.d
-	eor3	z_dest5.d, z_dest5.d, z_tmp5_lo.d, z_tmp5_hi.d
+	// --- OPTIMIZATION: Use non-destructive SVE2 TBL instruction ---
+	// Destination 1 calculation
+	tbl	z_tmp_lo_res.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft1_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest1_inout.d, z_dest1_inout.d, z_tmp_lo_res.d
 
-	/* Store all dest data in parallel */
-	st1b	z_dest1.b, p0, [x_dest1, x_pos]
-	st1b	z_dest2.b, p0, [x_dest2, x_pos]
-	st1b	z_dest3.b, p0, [x_dest3, x_pos]
-	st1b	z_dest4.b, p0, [x_dest4, x_pos]
-	st1b	z_dest5.b, p0, [x_dest5, x_pos]
+	// Destination 2 calculation
+	tbl	z_tmp_lo_res.b, {z_gft2_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft2_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest2_inout.d, z_dest2_inout.d, z_tmp_lo_res.d
+	
+	// Destination 3 calculation
+	tbl	z_tmp_lo_res.b, {z_gft3_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft3_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest3_inout.d, z_dest3_inout.d, z_tmp_lo_res.d
 
-	/* increment one vector length */
-	incb	x_pos
+	// Destination 4 calculation
+	tbl	z_tmp_lo_res.b, {z_gft4_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft4_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest4_inout.d, z_dest4_inout.d, z_tmp_lo_res.d
+	
+	// Destination 5 calculation
+	tbl	z_tmp_lo_res.b, {z_gft5_lo.b}, z_src_lo.b
+	tbl	z_tmp_hi_res.b, {z_gft5_hi.b}, z_src_hi.b
+	eor	z_tmp_lo_res.d, z_tmp_lo_res.d, z_tmp_hi_res.d
+	eor	z_dest5_inout.d, z_dest5_inout.d, z_tmp_lo_res.d
 
-	b	.Lloopsve2_vl
+
+	// Store all the final updated results for the processed chunk
+	st1b	z_dest1_inout.b, p0, [x_dest1, x_pos]
+	st1b	z_dest2_inout.b, p0, [x_dest2, x_pos]
+	st1b	z_dest3_inout.b, p0, [x_dest3, x_pos]
+	st1b	z_dest4_inout.b, p0, [x_dest4, x_pos]
+	st1b	z_dest5_inout.b, p0, [x_dest5, x_pos]
+
+	// Increment position by one vector length
+	incb	x_pos, all, mul #1
+	b	.Lloopsve2_mad_5v_vl
 
 .return_pass:
 	mov	w_ret, #0
