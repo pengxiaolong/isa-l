@@ -51,8 +51,10 @@ w_ret		.req	w0
 
 /* local variables */
 x_pos		.req	x6
-x_vl_b		.req	x7  // temp reg to hold vector length in bytes
-x_store_pos .req    x8  // temp reg to hold calculated store position
+/* Using x7 and x8 directly for temporary calculations */
+/* x7 will hold vector length in bytes */
+/* x8 will hold the calculated store offset */
+
 
 /* vectors */
 z_mask0f	.req	z0
@@ -79,7 +81,7 @@ cdecl(gf_vect_mad_sve):
 	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
 
 	mov	x_pos, #0
-    cntb x_vl_b // Get vector length in bytes once before loop
+    cntb x7, all, mul #1 // Get vector length in bytes into x7
 
 	/* --- Optimized Pipelined Loop --- */
 	whilelo	p0.b, x_pos, x_len
@@ -101,7 +103,7 @@ cdecl(gf_vect_mad_sve):
 	ld1b	z_dest_r.b, p1/z, [x_dest, x_pos]
 
 	/* Prefetch for future iterations */
-	prfb	pldl1keep, p0, [x_src, x_pos] // CORRECTED ADDRESSING
+	prfb	pldl1keep, p0, [x_src, x_pos]
 	prfb	pldl2strm, p0, [x_dest, x_pos]
 
 	/* Compute on the CURRENT data (loaded in the previous iteration) */
@@ -113,8 +115,8 @@ cdecl(gf_vect_mad_sve):
 	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
 
 	/* Store results from the PREVIOUS iteration */
-    sub x_store_pos, x_pos, x_vl_b // CORRECTED: Calculate store address
-	st1b	z_dest_r.b, p0, [x_dest, x_store_pos] // CORRECTED ADDRESSING
+    sub x8, x_pos, x7 // Calculate store address in scratch register x8
+	st1b	z_dest_r.b, p0, [x_dest, x8] // Use calculated address
 
 	/* Advance pipeline state */
 	incb	x_pos
@@ -128,8 +130,8 @@ cdecl(gf_vect_mad_sve):
 	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
 	eor	z_dest_r.d, z_tmp1_lo.d, z_dest_r.d
 	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
-    sub x_store_pos, x_pos, x_vl_b // CORRECTED: Calculate store address
-	st1b	z_dest_r.b, p0, [x_dest, x_store_pos] // CORRECTED ADDRESSING
+    sub x8, x_pos, x7 // Calculate store address in scratch register x8
+	st1b	z_dest_r.b, p0, [x_dest, x8] // Use calculated address
 
 .return_pass:
 	mov	w_ret, #0
