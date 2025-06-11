@@ -186,14 +186,20 @@ ec_encode_data_sve(int len, int k, int rows, unsigned char *g_tbls, unsigned cha
                 return;
         }
 
-        while (rows >= 6) {
-                gf_6vect_dot_prod_sve(len, k, g_tbls, data, coding);
-                g_tbls += 6 * k * 32;
-                coding += 6;
-                rows -= 6;
+        while (rows >= 8) {
+                gf_8vect_dot_prod_sve(len, k, g_tbls, data, coding);
+                g_tbls += 8 * k * 32;
+                coding += 8;
+                rows -= 8;
         }
 
         switch (rows) {
+        case 7:
+                gf_7vect_dot_prod_sve(len, k, g_tbls, data, coding);
+                break;
+        case 6:
+                gf_6vect_dot_prod_sve(len, k, g_tbls, data, coding);
+                break;
         case 5:
                 gf_5vect_dot_prod_sve(len, k, g_tbls, data, coding);
                 break;
@@ -302,14 +308,20 @@ ec_encode_data_sve2(int len, int k, int rows, unsigned char *g_tbls, unsigned ch
                 return;
         }
 
-        while (rows >= 6) {
-                gf_6vect_dot_prod_sve2(len, k, g_tbls, data, coding);
+        while (rows >= 8) {
+                gf_8vect_dot_prod_sve2(len, k, g_tbls, data, coding);
                 g_tbls += 6 * k * 32;
                 coding += 6;
                 rows -= 6;
         }
 
         switch (rows) {
+        case 7:
+                gf_7vect_dot_prod_sve2(len, k, g_tbls, data, coding);
+                break;
+        case 6:
+                gf_6vect_dot_prod_sve2(len, k, g_tbls, data, coding);
+                break;
         case 5:
                 gf_5vect_dot_prod_sve2(len, k, g_tbls, data, coding);
                 break;
