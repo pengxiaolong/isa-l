@@ -36,10 +36,10 @@
 #ifndef __APPLE__
 .type gf_2vect_mad_sve, %function
 #endif
+
 /* gf_2vect_mad_sve(int len, int vec, int vec_i, unsigned char *gftbls,
 			     unsigned char *src, unsigned char **dest);
  */
-
 /* arguments */
 x_len		.req	x0
 x_vec		.req	x1
@@ -55,6 +55,7 @@ w_ret		.req	w0
 x_pos		.req	x6
 x_dest2		.req	x7
 x_dest1		.req	x12
+/* Using x8, x9 for scratch calculations */
 
 /* vectors */
 z_mask0f	.req	z0
@@ -103,29 +104,29 @@ cdecl(gf_2vect_mad_sve):
 	// --- Optimized Loop Structure ---
 	// "Prime the pump": Handle first iteration before the main loop
 	// to start the data pipeline.
+
+	cntb    x8, all, mul #1 // Get vector length in bytes into x8
+
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	// 1. Load all data for the first iteration
+	// Prime the pipeline
 	ld1b	z_src.b,  p0/z, [x_src, x_pos]
 	ld1b	z_dest1.b,p0/z, [x_dest1, x_pos]
 	ld1b	z_dest2.b,p0/z, [x_dest2, x_pos]
 	incb	x_pos
 
 .Lloopsve_vl:
-	// 2. While previous data is loading, split the src into nibbles
 	and	z_src_lo.d, z_src.d, z_mask0f.d
 	lsr	z_src_hi.b, z_src.b, #4
 
-	// 3. Start loading data for the *next* iteration. This is the key
-	//    to hiding memory latency.
 	whilelo	p1.b, x_pos, x_len
 	ld1b	z_src.b,  p1/z, [x_src, x_pos]
 	ld1b	z_dest1.b,p1/z, [x_dest1, x_pos]
 	ld1b	z_dest2.b,p1/z, [x_dest2, x_pos]
 
 	// 4. Prefetch data for future iterations
-	prfb	pldl1keep, p0, [x_src, x_pos, lsl #2]
+	prfb	pldl1keep, p0, [x_src, x_pos]
 	prfb	pldl2strm, p0, [x_dest1, x_pos]
 	prfb	pldl2strm, p0, [x_dest2, x_pos]
 
@@ -145,14 +146,12 @@ cdecl(gf_2vect_mad_sve):
 	eor	z_dest2.d, z_tmp2_lo.d, z_dest2.d
 	eor	z_dest2.d, z_tmp2_hi.d, z_dest2.d
 
-	// 6. Store the results of the calculation from two iterations ago
-	//    (which are now final).
-	st1b	z_dest1.b, p0, [x_dest1, x_pos, #-1, mul vl]
-	st1b	z_dest2.b, p0, [x_dest2, x_pos, #-1, mul vl]
+    sub x9, x_pos, x8 // Calculate store address
+	st1b	z_dest1.b, p0, [x_dest1, x9]
+	st1b	z_dest2.b, p0, [x_dest2, x9]
 
 	// 7. Loop control
 	incb	x_pos
-	pfalse	p0.b
 	mov	p0.b, p1.b
 	b.first	.Lloopsve_vl
 
@@ -170,9 +169,9 @@ cdecl(gf_2vect_mad_sve):
 	eor	z_dest2.d, z_tmp2_lo.d, z_dest2.d
 	eor	z_dest2.d, z_tmp2_hi.d, z_dest2.d
 
-	st1b	z_dest1.b, p0, [x_dest1, x_pos, #-1, mul vl]
-	st1b	z_dest2.b, p0, [x_dest2, x_pos, #-1, mul vl]
-
+    sub x9, x_pos, x8
+	st1b	z_dest1.b, p0, [x_dest1, x9]
+	st1b	z_dest2.b, p0, [x_dest2, x9]
 
 .return_pass:
 	mov	w_ret, #0
