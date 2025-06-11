@@ -51,19 +51,16 @@ w_ret		.req	w0
 
 /* local variables */
 x_pos		.req	x6
+/* Using x7, x8 for scratch calculations */
 
 /* vectors */
 z_mask0f	.req	z0
-
 z_src		.req	z1
 z_src_lo	.req	z2
 z_src_hi	.req	z_src
-
 z_dest		.req	z3
-
 z_tmp1_lo	.req	z4
 z_tmp1_hi	.req	z5
-
 z_gft1_lo	.req	z6
 z_gft1_hi	.req	z7
 q_gft1_lo	.req	q6
@@ -81,6 +78,7 @@ cdecl(gf_vect_mul_sve):
 	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
 
 	mov	x_pos, #0
+    cntb x7, all, mul #1 // Get vector length in bytes into x7
 
 	/* --- Optimized Pipelined Loop --- */
 	whilelo	p0.b, x_pos, x_len
@@ -100,7 +98,7 @@ cdecl(gf_vect_mul_sve):
 	ld1b	z_src.b, p1/z, [x_src, x_pos]
 
 	/* Prefetch for future iterations */
-	prfb	pldl1keep, p0, [x_src, x_pos, lsl #2]
+	prfb	pldl1keep, p0, [x_src, x_pos]
 	prfb	pldl1strm, p0, [x_dest, x_pos]
 
 	/* Compute on the CURRENT data (loaded in the previous iteration) */
@@ -111,7 +109,8 @@ cdecl(gf_vect_mul_sve):
 	eor	z_dest.d, z_tmp1_lo.d, z_tmp1_hi.d
 
 	/* Store results from the PREVIOUS iteration */
-	st1b	z_dest.b, p0, [x_dest, x_pos, #-1, mul vl]
+    sub x8, x_pos, x7 // Calculate store address
+	st1b	z_dest.b, p0, [x_dest, x8] // Use calculated address
 
 	/* Advance pipeline state */
 	incb	x_pos
@@ -124,7 +123,8 @@ cdecl(gf_vect_mul_sve):
 	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
 	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
 	eor	z_dest.d, z_tmp1_lo.d, z_tmp1_hi.d
-	st1b	z_dest.b, p0, [x_dest, x_pos, #-1, mul vl]
+    sub x8, x_pos, x7
+	st1b	z_dest.b, p0, [x_dest, x8]
 
 .return_pass:
 	mov	w_ret, #0
