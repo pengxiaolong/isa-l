@@ -29,98 +29,85 @@
 .text
 .align		6
 .arch		armv8-a+sve
-
 #include "../include/aarch64_label.h"
 
 .global cdecl(gf_vect_dot_prod_sve)
 #ifndef __APPLE__
 .type gf_vect_dot_prod_sve, %function
 #endif
-/* void gf_vect_dot_prod_sve(int len, int vlen, unsigned char *gftbls,
-				unsigned char **src, unsigned char *dest);
- */
 
-/* arguments */
-x_len		.req	x0	/* vector length */
-x_vec		.req	x1	/* number of source vectors (ie. data blocks) */
+x_len		.req	x0
+x_vec		.req	x1
 x_tbl		.req	x2
 x_src		.req	x3
 x_dest1		.req	x4
-
-/* returns */
 w_ret		.req	w0
-
-/* local variables */
 x_vec_i		.req	x5
 x_ptr		.req	x6
 x_pos		.req	x7
 x_tbl1		.req	x8
-
-/* vectors */
+x_vec_end	.req	x9
 z_mask0f	.req	z0
-
 z_src		.req	z1
 z_src_lo	.req	z2
 z_src_hi	.req	z_src
-
 z_dest		.req	z3
-
 z_gft1_lo	.req	z4
 z_gft1_hi	.req	z5
 q_gft1_lo	.req	q4
 q_gft1_hi	.req	q5
 
 cdecl(gf_vect_dot_prod_sve):
-	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
+	mov	z_mask0f.b, #0x0f
 	mov	x_pos, #0
 	lsl	x_vec, x_vec, #3
+	add	x_vec_end, x_src, x_vec
 
-/* Loop 1: x_len, vector length */
 .Lloopsve_vl:
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	mov	z_dest.b, #0			/* clear z_dest */
-	mov	x_vec_i, #0			/* clear x_vec_i */
-	mov	x_tbl1, x_tbl			/* reset x_tbl1 */
+	mov	z_dest.b, #0
+	mov	x_vec_i, x_src
+	mov	x_tbl1, x_tbl
 
-/* Loop 2: x_vec, number of source vectors (ie. data blocks) */
+	// Prime the loop
+	ldr	x_ptr, [x_vec_i], #8
+	ldp	q_gft1_lo, q_gft1_hi, [x_tbl1], #32
+
 .Lloopsve_vl_vects:
-	ldr	x_ptr, [x_src, x_vec_i]		/* x_ptr: src base addr. */
-	/* load src data, governed by p0 */
-	ld1b	z_src.b,  p0/z, [x_ptr, x_pos]	/* load from: src base + pos offset */
+	ld1b	z_src.b, p0/z, [x_ptr, x_pos]
+	// OPTIMIZATION: Load next pointer and table while processing current
+	ldr	x_ptr, [x_vec_i], #8
+	ldp	q_gft1_lo, q_gft1_hi, [x_tbl1], #32
 
-	add	x_vec_i, x_vec_i, #8		/* move x_vec_i to next */
-
-	/* load gf_table */
-	ldp	q_gft1_lo, q_gft1_hi, [x_tbl1], #32	/* x_tbl1 is added by #32
-							   for each src vect */
-
-	/* split 4-bit lo; 4-bit hi */
 	and	z_src_lo.d, z_src.d, z_mask0f.d
 	lsr	z_src_hi.b, z_src.b, #4
 
-	/* table indexing, ie. gf(2^8) multiplication */
-	tbl	z_gft1_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_gft1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	// OPTIMIZATION: Use table data loaded in previous iteration
+	tbl	z_gft1_lo.b, {z4.b}, z_src_lo.b
+	tbl	z_gft1_hi.b, {z5.b}, z_src_hi.b
 
-	/* exclusive or, ie. gf(2^8) add */
 	eor	z_dest.d, z_gft1_lo.d, z_dest.d
 	eor	z_dest.d, z_gft1_hi.d, z_dest.d
 
-	cmp	x_vec_i, x_vec
+	cmp	x_vec_i, x_vec_end
 	blt	.Lloopsve_vl_vects
 
-	/* end of Loop 2 */
-	/* store dest data, governed by p0 */
-	st1b	z_dest.b, p0, [x_dest1, x_pos]
-	/* increment one vector length */
-	incb	x_pos
+	// Final computation with last loaded table
+	ld1b	z_src.b, p0/z, [x_ptr, x_pos]
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src.b, #4
+	tbl	z_gft1_lo.b, {z4.b}, z_src_lo.b
+	tbl	z_gft1_hi.b, {z5.b}, z_src_hi.b
+	eor	z_dest.d, z_gft1_lo.d, z_dest.d
+	eor	z_dest.d, z_gft1_hi.d, z_dest.d
 
+	st1b	z_dest.b, p0, [x_dest1, x_pos]
+	incb	x_pos
 	b	.Lloopsve_vl
 
 .return_pass:

@@ -36,10 +36,10 @@
 #ifndef __APPLE__
 .type gf_2vect_mad_sve, %function
 #endif
-
 /* gf_2vect_mad_sve(int len, int vec, int vec_i, unsigned char *gftbls,
-			     unsigned char *src, unsigned char **dest);
- */
+			     unsigned char *src, unsigned char **dest);
+ */
+
 /* arguments */
 x_len		.req	x0
 x_vec		.req	x1
@@ -64,84 +64,115 @@ z_src_lo	.req	z2
 z_src_hi	.req	z_src
 
 z_dest1		.req	z3
+z_dest2		.req	z27
 
-z_tmp_lo	.req	z4
-z_tmp_hi	.req	z5
+// Using separate temp registers to increase instruction-level parallelism
+z_tmp1_lo	.req	z4
+z_tmp1_hi	.req	z5
 
 z_gft1_lo	.req	z6
 z_gft1_hi	.req	z7
 q_gft1_lo	.req	q6
 q_gft1_hi	.req	q7
 
-/* bottom 64-bit of v8..v15 must be preserved if used */
+// Use non-preserved z8, z9 for the second set of temp results
+z_tmp2_lo   .req    z8
+z_tmp2_hi   .req    z9
+
 z_gft2_lo	.req	z17
 z_gft2_hi	.req	z18
 q_gft2_lo	.req	q17
 q_gft2_hi	.req	q18
 
-z_dest2		.req	z27
 
 cdecl(gf_2vect_mad_sve):
-	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
-	/* load table 1 */
-	add	x_tbl, x_tbl, x_vec_i, LSL #5	/* x_tbl += x_vec_i * 2^5 */
-
-	/* Load table 1 with NEON instruction ldp */
+	mov	z_mask0f.b, #0x0f
+	add	x_tbl, x_tbl, x_vec_i, LSL #5
 	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
-	/* load table 2 */
-	add	x_tbl, x_tbl, x_vec, LSL #5	/* x_tbl += x_vec * 2^5 */
+
+	add	x_tbl, x_tbl, x_vec, LSL #5
 	ldp	q_gft2_lo, q_gft2_hi, [x_tbl]
 
-	ldr	x_dest1, [x_dest, #8*0]		/* pointer to dest1 */
-	ldr	x_dest2, [x_dest, #8*1]		/* pointer to dest2 */
-
+	ldr	x_dest1, [x_dest, #8*0]
+	ldr	x_dest2, [x_dest, #8*1]
 	mov	x_pos, #0
 
-	/* vector length agnostic */
-.Lloopsve_vl:
+	// --- Optimized Loop Structure ---
+	// "Prime the pump": Handle first iteration before the main loop
+	// to start the data pipeline.
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	/* prefetch dest data */
-	prfb	pldl2strm, p0, [x_dest1, x_pos]
-	prfb	pldl2strm, p0, [x_dest2, x_pos]
-
-	/* load src data, governed by p0 */
+	// 1. Load all data for the first iteration
 	ld1b	z_src.b,  p0/z, [x_src, x_pos]
+	ld1b	z_dest1.b,p0/z, [x_dest1, x_pos]
+	ld1b	z_dest2.b,p0/z, [x_dest2, x_pos]
+	incb	x_pos
 
-	/* split 4-bit lo; 4-bit hi */
+.Lloopsve_vl:
+	// 2. While previous data is loading, split the src into nibbles
 	and	z_src_lo.d, z_src.d, z_mask0f.d
 	lsr	z_src_hi.b, z_src.b, #4
 
-	/* load dest data, governed by p0 */
-	ld1b	z_dest1.b, p0/z, [x_dest1, x_pos]
-	ld1b	z_dest2.b, p0/z, [x_dest2, x_pos]
+	// 3. Start loading data for the *next* iteration. This is the key
+	//    to hiding memory latency.
+	whilelo	p1.b, x_pos, x_len
+	ld1b	z_src.b,  p1/z, [x_src, x_pos]
+	ld1b	z_dest1.b,p1/z, [x_dest1, x_pos]
+	ld1b	z_dest2.b,p1/z, [x_dest2, x_pos]
 
-	/* dest1 */
-	/* table indexing, ie. gf(2^8) multiplication */
-	tbl	z_tmp_lo.b, {z_gft1_lo.b}, z_src_lo.b
-	tbl	z_tmp_hi.b, {z_gft1_hi.b}, z_src_hi.b
-	/* exclusive or, ie. gf(2^8) add */
-	eor	z_dest1.d, z_tmp_lo.d, z_dest1.d
-	eor	z_dest1.d, z_tmp_hi.d, z_dest1.d
+	// 4. Prefetch data for future iterations
+	prfb	pldl1keep, p0, [x_src, x_pos, lsl #2]
+	prfb	pldl2strm, p0, [x_dest1, x_pos]
+	prfb	pldl2strm, p0, [x_dest2, x_pos]
 
-	/* dest2 */
-	tbl	z_tmp_lo.b, {z_gft2_lo.b}, z_src_lo.b
-	tbl	z_tmp_hi.b, {z_gft2_hi.b}, z_src_hi.b
-	eor	z_dest2.d, z_tmp_lo.d, z_dest2.d
-	eor	z_dest2.d, z_tmp_hi.d, z_dest2.d
+	// 5. Perform computations on the data loaded in the *previous* iteration
+	//    By now, the data is ready in the registers, avoiding stalls.
+	// dest1 - use z_tmp1_lo/hi
+	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
 
-	/* store dest data, governed by p0 */
-	st1b	z_dest1.b, p0, [x_dest1, x_pos]
-	st1b	z_dest2.b, p0, [x_dest2, x_pos]
-	/* increment one vector length */
+	// dest2 - use z_tmp2_lo/hi to allow parallel execution
+	tbl	z_tmp2_lo.b, {z_gft2_lo.b}, z_src_lo.b
+	tbl	z_tmp2_hi.b, {z_gft2_hi.b}, z_src_hi.b
+
+	eor	z_dest1.d, z_tmp1_lo.d, z_dest1.d
+	eor	z_dest1.d, z_tmp1_hi.d, z_dest1.d
+
+	eor	z_dest2.d, z_tmp2_lo.d, z_dest2.d
+	eor	z_dest2.d, z_tmp2_hi.d, z_dest2.d
+
+	// 6. Store the results of the calculation from two iterations ago
+	//    (which are now final).
+	st1b	z_dest1.b, p0, [x_dest1, x_pos, #-1, mul vl]
+	st1b	z_dest2.b, p0, [x_dest2, x_pos, #-1, mul vl]
+
+	// 7. Loop control
 	incb	x_pos
+	pfalse	p0.b
+	mov	p0.b, p1.b
+	b.first	.Lloopsve_vl
 
-	b	.Lloopsve_vl
+	// --- Post-loop: Store the final iteration's result ---
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src.b, #4
+
+	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	tbl	z_tmp2_lo.b, {z_gft2_lo.b}, z_src_lo.b
+	tbl	z_tmp2_hi.b, {z_gft2_hi.b}, z_src_hi.b
+
+	eor	z_dest1.d, z_tmp1_lo.d, z_dest1.d
+	eor	z_dest1.d, z_tmp1_hi.d, z_dest1.d
+	eor	z_dest2.d, z_tmp2_lo.d, z_dest2.d
+	eor	z_dest2.d, z_tmp2_hi.d, z_dest2.d
+
+	st1b	z_dest1.b, p0, [x_dest1, x_pos, #-1, mul vl]
+	st1b	z_dest2.b, p0, [x_dest2, x_pos, #-1, mul vl]
+
 
 .return_pass:
 	mov	w_ret, #0

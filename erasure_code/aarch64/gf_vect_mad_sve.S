@@ -29,7 +29,6 @@
 .text
 .align		6
 .arch		armv8-a+sve
-
 #include "../include/aarch64_label.h"
 
 .global cdecl(gf_vect_mad_sve)
@@ -37,85 +36,74 @@
 .type gf_vect_mad_sve, %function
 #endif
 
-/* gf_vect_mad_sve(int len, int vec, int vec_i, unsigned char *gftbls,
-			     unsigned char *src, unsigned char *dest);
- */
-/* arguments */
 x_len		.req	x0
-x_vec		.req	x1
 x_vec_i		.req	x2
 x_tbl		.req	x3
 x_src		.req	x4
 x_dest		.req	x5
-
-/* returns */
 w_ret		.req	w0
-
-/* local variables */
 x_pos		.req	x6
-
-/* vectors */
 z_mask0f	.req	z0
-
 z_src		.req	z1
 z_src_lo	.req	z2
 z_src_hi	.req	z_src
-
-z_dest		.req	z3
-
+z_dest_r	.req	z3 // Renamed to avoid confusion
 z_tmp1_lo	.req	z4
 z_tmp1_hi	.req	z5
-
 z_gft1_lo	.req	z6
 z_gft1_hi	.req	z7
 q_gft1_lo	.req	q6
 q_gft1_hi	.req	q7
 
 cdecl(gf_vect_mad_sve):
-	/* less than 16 bytes, return_fail */
 	cmp	x_len, #16
 	blt	.return_fail
 
-	mov	z_mask0f.b, #0x0f		/* z_mask0f = 0x0F0F...0F */
-	add	x_tbl, x_tbl, x_vec_i, LSL #5	/* x_tbl += x_vec_i * 2^5 */
-
-	/* Load with NEON instruction ldp */
+	mov	z_mask0f.b, #0x0f
+	add	x_tbl, x_tbl, x_vec_i, LSL #5
 	ldp	q_gft1_lo, q_gft1_hi, [x_tbl]
-
 	mov	x_pos, #0
 
-	/* vector length agnostic */
-.Lloopsve_vl:
+	// --- Optimized Pipelined Loop ---
 	whilelo	p0.b, x_pos, x_len
 	b.none	.return_pass
 
-	/* prefetch dest data */
-	prfb	pldl2strm, p0, [x_dest, x_pos]
+	// Prime the pipeline
+	ld1b	z_src.b, p0/z, [x_src, x_pos]
+	ld1b	z_dest_r.b, p0/z, [x_dest, x_pos]
+	incb	x_pos
 
-	/* load src data, governed by p0 */
-	ld1b	z_src.b,  p0/z, [x_src, x_pos]
-
-	/* split 4-bit lo; 4-bit hi */
+.Lloopsve_vl:
 	and	z_src_lo.d, z_src.d, z_mask0f.d
 	lsr	z_src_hi.b, z_src.b, #4
 
-	/* load dest data, governed by p0 */
-	ld1b	z_dest.b, p0/z, [x_dest, x_pos]
+	whilelo	p1.b, x_pos, x_len
+	ld1b	z_src.b, p1/z, [x_src, x_pos]
+	ld1b	z_dest_r.b, p1/z, [x_dest, x_pos]
 
-	/* table indexing, ie. gf(2^8) multiplication */
+	prfb	pldl1keep, p0, [x_src, x_pos, lsl #2]
+	prfb	pldl2strm, p0, [x_dest, x_pos]
+
 	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
 	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
 
-	/* exclusive or, ie. gf(2^8) add */
-	eor	z_dest.d, z_tmp1_lo.d, z_dest.d
-	eor	z_dest.d, z_tmp1_hi.d, z_dest.d
+	eor	z_dest_r.d, z_tmp1_lo.d, z_dest_r.d
+	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
 
-	/* store dest data, governed by p0 */
-	st1b	z_dest.b, p0, [x_dest, x_pos]
-	/* increment one vector length */
+	st1b	z_dest_r.b, p0, [x_dest, x_pos, #-1, mul vl]
+
 	incb	x_pos
+	mov	p0.b, p1.b
+	b.first	.Lloopsve_vl
 
-	b	.Lloopsve_vl
+	// Finalize pipeline
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src.b, #4
+	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	eor	z_dest_r.d, z_tmp1_lo.d, z_dest_r.d
+	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
+	st1b	z_dest_r.b, p0, [x_dest, x_pos, #-1, mul vl]
 
 .return_pass:
 	mov	w_ret, #0
