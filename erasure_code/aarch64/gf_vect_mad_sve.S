@@ -113,4 +113,28 @@ cdecl(gf_vect_mad_sve):
 	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
 
 	/* Store results from the PREVIOUS iteration */
-    sub x_store_pos, x
+    sub x_store_pos, x_pos, x_vl_b // CORRECTED: Calculate store address
+	st1b	z_dest_r.b, p0, [x_dest, x_store_pos] // CORRECTED ADDRESSING
+
+	/* Advance pipeline state */
+	incb	x_pos
+	mov	p0.b, p1.b
+	b.first	.Lloopsve_vl
+
+	/* Finalize pipeline: compute and store the last block */
+	and	z_src_lo.d, z_src.d, z_mask0f.d
+	lsr	z_src_hi.b, z_src.b, #4
+	tbl	z_tmp1_lo.b, {z_gft1_lo.b}, z_src_lo.b
+	tbl	z_tmp1_hi.b, {z_gft1_hi.b}, z_src_hi.b
+	eor	z_dest_r.d, z_tmp1_lo.d, z_dest_r.d
+	eor	z_dest_r.d, z_tmp1_hi.d, z_dest_r.d
+    sub x_store_pos, x_pos, x_vl_b // CORRECTED: Calculate store address
+	st1b	z_dest_r.b, p0, [x_dest, x_store_pos] // CORRECTED ADDRESSING
+
+.return_pass:
+	mov	w_ret, #0
+	ret
+
+.return_fail:
+	mov	w_ret, #1
+	ret
